@@ -1,0 +1,6 @@
+.DS_Store
+
+kill-orphaned-claude.sh
+killer.log
+launchd.err.log
+launchd.out.log
