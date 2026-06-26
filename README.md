@@ -56,6 +56,29 @@ sessions, legacy orphans) are never candidates.**
 > task → budget lookup. Keeping them separate also lets the killer auto-prune
 > completion rows once their PID is gone, so neither file grows unbounded.
 
+**4. A second pass catches runs that died *before* they could register.**
+A schedule run that hits the account's **weekly usage limit** errors on its very first model call — before it can register (point 1) or write a completion marker. It never reaches `registry.tsv`, so the registry-based logic can't see it.
+
+A second pass (`Pass 2` in the script) handles this case from a log signal instead of the registry:
+
+- Claude Desktop records the failure in `~/Library/Logs/Claude/main.log` with the
+  session id, and that session's `Starting local session` line shares its second with
+  the OS process's start time (`lstart`).
+- So for each live **`auto`-mode** PID, the killer matches its start-second against the
+  log and reaps it **only if every session that started at that second hit a hard quota
+  limit** (`weekly limit` / `hit your … limit`).
+- A weekly-limit errored session is reaped within one cycle (≤ 5 min). Set `WEEKLY_LIMIT_REAP=0` to disable it.
+
+The safety bias is the same as the rest of the killer:
+
+| Guard | Effect |
+|-------|--------|
+| only `auto`-mode PIDs are considered | an interactive (`acceptEdits`) session is never touched |
+| every session at that second must have failed | a healthy run that merely shares the second is skipped |
+| hard quota only — not the transient `too many requests` | a session that hit a passing 429 and recovered is left alone |
+| anything ambiguous is skipped | left to Claude Desktop's ~15-min idle reaper as a backstop |
+
+
 ---
 
 ## How to install this script
