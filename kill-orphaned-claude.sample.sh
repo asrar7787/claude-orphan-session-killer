@@ -36,12 +36,24 @@
 # Two files on purpose: the reaper rewrites registry.tsv to a strict 3 columns,
 # which would strip completed.tsv's extra columns and break the budget lookup.
 #
-# Env: DRY_RUN=1  -> log intended kills without killing.
+# Pass 2 (weekly-usage-limit casualties): a run that hits the account weekly-usage
+# limit fails on its FIRST model call, before it can register (Step 0) or mark
+# completion (Step 7) — so the registry can never see it. The desktop app logs the
+# failure to main.log with the session id, and that session's "Starting local
+# session" line shares its second with the OS process start time (lstart). It reaps a
+# live auto-mode PID only when EVERY session that started at its start-second failed
+# with the weekly limit, so an interactive session (acceptEdits, never iterated) or a
+# healthy run that merely shares a second is never killed.
+#
+# Env: DRY_RUN=1            -> log intended kills without killing.
+#      WEEKLY_LIMIT_REAP=0  -> disable Pass 2.
 
 DRY_RUN="${DRY_RUN:-0}"
+WEEKLY_LIMIT_REAP="${WEEKLY_LIMIT_REAP:-1}"
 DEFAULT_MAX=1800               # fallback budget (s) for an unknown task
 CLAUDE_SUFFIX="/claude.app/Contents/MacOS/claude"
 DISCLAIMER="/Applications/Claude.app/Contents/Helpers/disclaimer"
+MAIN_LOG="$HOME/Library/Logs/Claude/main.log"  # desktop log: api_error + session ids
 
 LOGDIR="$HOME/.claude/orphan-killer"
 LOG="$LOGDIR/killer.log"
@@ -147,5 +159,45 @@ for reg in "$HOME"/.claude/scheduled-tasks/*/orphan-killer/registry.tsv; do
     mv "$dtmp" "$done_file" 2>/dev/null
   fi
 done
+
+# ── Pass 2: weekly-usage-limit casualty reaper ────────────────────────────────
+if [ "$WEEKLY_LIMIT_REAP" = 1 ] && [ -f "$MAIN_LOG" ]; then
+  ps -axo pid=,command= | grep -E "claude-code/[0-9.]+/claude\.app/Contents/MacOS/claude" | grep -v disclaimer | grep -v grep | while read -r wpid wrest; do
+    case "$wpid" in ''|*[!0-9]*) continue ;; esac
+    case "$wrest" in *"--permission-mode auto"*) ;; *) continue ;; esac   # scheduled only; never interactive
+    L=$(epoch_of "$wpid"); [ -z "$L" ] && continue
+
+    # session-ids whose "Starting local session" line shares this PID's start
+    # second (allow 0-2s skew between the log write and the OS fork)
+    cands=""
+    for off in 0 1 2; do
+      ts=$(date -r $(( L - off )) "+%Y-%m-%d %H:%M:%S" 2>/dev/null) || continue
+      ids=$(grep -aF "$ts " "$MAIN_LOG" 2>/dev/null | grep -oE "Starting local session local_[0-9a-f-]+" | grep -oE "local_[0-9a-f-]+")
+      [ -n "$ids" ] && cands="$cands
+$ids"
+    done
+    cands=$(printf '%s\n' "$cands" | grep . | sort -u)
+    [ -z "$cands" ] && continue          # can't identify this PID's session -> leave to WarmLifecycle/age
+
+    n=0; failed=0
+    for sid in $cands; do
+      n=$(( n + 1 ))
+      grep -aqE "$sid .*(hit your .*limit|weekly limit)" "$MAIN_LOG" 2>/dev/null && failed=$(( failed + 1 ))   # hard quota only (weekly / 5-hour); NOT transient "too many requests"
+    done
+    { [ "$failed" -gt 0 ] && [ "$failed" -eq "$n" ]; } || continue   # kill only if ALL sessions at this second failed
+
+    age=$(( now - L ))
+    sids=$(printf '%s' "$cands" | tr '\n' ',')
+    if [ "$DRY_RUN" = 1 ]; then
+      log "[dry-run] would weekly-limit-reap pid=$wpid age=${age}s sessions=$sids"
+    else
+      wppid=$(ps -o ppid= -p "$wpid" 2>/dev/null | tr -d ' ')
+      if kill -9 "$wpid" 2>/dev/null; then
+        log "weekly-limit-reaped pid=$wpid age=${age}s sessions=$sids"
+        [ "$(ps -o comm= -p "$wppid" 2>/dev/null)" = "$DISCLAIMER" ] && kill -9 "$wppid" 2>/dev/null
+      fi
+    fi
+  done
+fi
 
 exit 0
