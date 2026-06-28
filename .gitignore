@@ -1,5 +1,10 @@
 .DS_Store
 
+!kill-orphaned-claude.sample.sh
+!killer.log.sample
+!launchd.err.log.sample
+!launchd.out.log.sample
+
 kill-orphaned-claude.sh
 killer.log
 launchd.err.log
